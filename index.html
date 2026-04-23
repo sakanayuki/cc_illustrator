@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>お絵かき</title>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script type="text/babel" src="ios-frame.jsx"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a1a2e;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: -apple-system, system-ui, sans-serif;
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+const COLORS = ['#000000','#ef4444','#f97316','#eab308','#22c55e','#3b82f6','#8b5cf6','#ec4899','#ffffff'];
+const SIZES = [3, 7, 14, 24];
+
+function DrawingApp() {
+  const canvasRef = useRef(null);
+  const [strokes, setStrokes] = useState([]); // [{color, size, points:[{x,y}]}]
+  const [currentStroke, setCurrentStroke] = useState(null);
+  const [color, setColor] = useState('#000000');
+  const [size, setSize] = useState(7);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [playProgress, setPlayProgress] = useState(0); // 0..1
+  const [showColorPicker, setShowColorPicker] = useState(false);
+  const [showSizePicker, setShowSizePicker] = useState(false);
+  const playRef = useRef(null);
+  const animRef = useRef(null);
+
+  // Draw all strokes on canvas
+  const redraw = useCallback((strokesToDraw, partial = null) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const drawStroke = (stroke) => {
+      if (!stroke.points || stroke.points.length < 2) {
+        if (stroke.points && stroke.points.length === 1) {
+          ctx.beginPath();
+          ctx.arc(stroke.points[0].x, stroke.points[0].y, stroke.size / 2, 0, Math.PI * 2);
+          ctx.fillStyle = stroke.color;
+          ctx.fill();
+        }
+        return;
+      }
+      ctx.beginPath();
+      ctx.strokeStyle = stroke.color;
+      ctx.lineWidth = stroke.size;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.moveTo(stroke.points[0].x, stroke.points[0].y);
+      for (let i = 1; i < stroke.points.length; i++) {
+        ctx.lineTo(stroke.points[i].x, stroke.points[i].y);
+      }
+      ctx.stroke();
+    };
+
+    strokesToDraw.forEach(s => drawStroke(s));
+    if (partial) drawStroke(partial);
+  }, []);
+
+  // Redraw when strokes change
+  useEffect(() => {
+    if (!isPlaying) redraw(strokes, currentStroke);
+  }, [strokes, currentStroke, isPlaying, redraw]);
+
+  // Touch/mouse events
+  const getPos = (e, canvas) => {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const src = e.touches ? e.touches[0] : e;
+    return {
+      x: (src.clientX - rect.left) * scaleX,
+      y: (src.clientY - rect.top) * scaleY,
+    };
+  };
+
+  const startDraw = (e) => {
+    if (isPlaying) return;
+    e.preventDefault();
+    const canvas = canvasRef.current;
+    const pos = getPos(e, canvas);
+    setCurrentStroke({ color, size, points: [pos] });
+    setShowColorPicker(false);
+    setShowSizePicker(false);
+  };
+
+  const moveDraw = (e) => {
+    if (!currentStroke || isPlaying) return;
+    e.preventDefault();
+    const canvas = canvasRef.current;
+    const pos = getPos(e, canvas);
+    setCurrentStroke(prev => ({
+      ...prev,
+      points: [...prev.points, pos],
+    }));
+  };
+
+  const endDraw = (e) => {
+    if (!currentStroke) return;
+    e.preventDefault();
+    setStrokes(prev => [...prev, currentStroke]);
+    setCurrentStroke(null);
+  };
+
+  // Undo
+  const undo = () => {
+    if (isPlaying) return;
+    setStrokes(prev => prev.slice(0, -1));
+  };
+
+  // Clear
+  const clear = () => {
+    if (isPlaying) return;
+    setStrokes([]);
+    setCurrentStroke(null);
+  };
+
+  // Play animation
+  const play = () => {
+    if (strokes.length === 0) return;
+    setIsPlaying(true);
+    setShowColorPicker(false);
+    setShowSizePicker(false);
+
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Flatten all points with stroke reference
+    const allPoints = [];
+    strokes.forEach((stroke, si) => {
+      stroke.points.forEach((pt, pi) => {
+        allPoints.push({ si, pi, stroke });
+      });
+    });
+
+    const total = allPoints.length;
+    if (total === 0) { setIsPlaying(false); return; }
+
+    const speed = Math.max(1, Math.ceil(total / 600)); // aim ~600 frames
+    let idx = 0;
+    let drawnStrokes = new Set();
+
+    const step = () => {
+      for (let s = 0; s < speed && idx < total; s++, idx++) {
+        const { si, pi, stroke } = allPoints[idx];
+        if (pi === 0) {
+          ctx.beginPath();
+          ctx.strokeStyle = stroke.color;
+          ctx.lineWidth = stroke.size;
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+          ctx.moveTo(stroke.points[0].x, stroke.points[0].y);
+          drawnStrokes.add(si);
+        } else {
+          ctx.lineTo(stroke.points[pi].x, stroke.points[pi].y);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(stroke.points[pi].x, stroke.points[pi].y);
+        }
+      }
+      setPlayProgress(idx / total);
+      if (idx < total) {
+        animRef.current = requestAnimationFrame(step);
+      } else {
+        setIsPlaying(false);
+        setPlayProgress(0);
+        redraw(strokes);
+      }
+    };
+
+    animRef.current = requestAnimationFrame(step);
+  };
+
+  const stopPlay = () => {
+    if (animRef.current) cancelAnimationFrame(animRef.current);
+    setIsPlaying(false);
+    setPlayProgress(0);
+    redraw(strokes);
+  };
+
+  // Canvas size
+  const CANVAS_W = 370;
+  const CANVAS_H = 580;
+
+  return (
+    <IOSDevice width={402} height={874} dark={false}>
+      {/* App content inside device */}
+      <div style={{
+        height: '100%',
+        display: 'flex',
+        flexDirection: 'column',
+        background: '#f8f8f8',
+        paddingTop: 60,
+        paddingBottom: 34,
+      }}>
+        {/* Header */}
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '8px 16px 8px',
+        }}>
+          <span style={{ fontSize: 20, fontWeight: 700, color: '#111', letterSpacing: -0.5 }}>お絵かき</span>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <ToolBtn onClick={undo} disabled={strokes.length === 0 || isPlaying} title="元に戻す">
+              <UndoIcon />
+            </ToolBtn>
+            <ToolBtn onClick={clear} disabled={strokes.length === 0 || isPlaying} title="クリア">
+              <TrashIcon />
+            </ToolBtn>
+          </div>
+        </div>
+
+        {/* Canvas */}
+        <div style={{
+          flex: 1,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '4px 16px',
+          position: 'relative',
+        }}>
+          <div style={{
+            borderRadius: 16,
+            overflow: 'hidden',
+            boxShadow: '0 4px 24px rgba(0,0,0,0.12)',
+            background: '#fff',
+            position: 'relative',
+            width: '100%',
+            aspectRatio: '370/580',
+          }}>
+            <canvas
+              ref={canvasRef}
+              width={CANVAS_W}
+              height={CANVAS_H}
+              style={{
+                width: '100%',
+                height: '100%',
+                display: 'block',
+                touchAction: 'none',
+                cursor: isPlaying ? 'default' : 'crosshair',
+              }}
+              onMouseDown={startDraw}
+              onMouseMove={moveDraw}
+              onMouseUp={endDraw}
+              onMouseLeave={endDraw}
+              onTouchStart={startDraw}
+              onTouchMove={moveDraw}
+              onTouchEnd={endDraw}
+            />
+            {/* Play progress overlay */}
+            {isPlaying && (
+              <div style={{
+                position: 'absolute',
+                bottom: 0, left: 0, right: 0,
+                height: 3,
+                background: 'rgba(0,0,0,0.08)',
+              }}>
+                <div style={{
+                  height: '100%',
+                  width: `${playProgress * 100}%`,
+                  background: '#3b82f6',
+                  transition: 'width 0.05s linear',
+                }} />
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Bottom toolbar */}
+        <div style={{
+          padding: '8px 16px 6px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 8,
+          position: 'relative',
+        }}>
+          {/* Color picker popup */}
+          {showColorPicker && (
+            <div style={{
+              position: 'absolute',
+              bottom: '100%',
+              left: 16,
+              background: '#fff',
+              borderRadius: 16,
+              padding: '10px 12px',
+              boxShadow: '0 8px 32px rgba(0,0,0,0.18)',
+              display: 'flex',
+              gap: 8,
+              flexWrap: 'wrap',
+              width: 240,
+              zIndex: 100,
+              marginBottom: 8,
+            }}>
+              {COLORS.map(c => (
+                <button
+                  key={c}
+                  onClick={() => { setColor(c); setShowColorPicker(false); }}
+                  style={{
+                    width: 32, height: 32, borderRadius: '50%',
+                    background: c,
+                    border: color === c ? '3px solid #3b82f6' : '2px solid #e5e7eb',
+                    cursor: 'pointer',
+                    transition: 'transform 0.1s',
+                    transform: color === c ? 'scale(1.15)' : 'scale(1)',
+                    boxShadow: c === '#ffffff' ? '0 0 0 1px #d1d5db inset' : 'none',
+                  }}
+                />
+              ))}
+            </div>
+          )}
+
+          {/* Size picker popup */}
+          {showSizePicker && (
+            <div style={{
+              position: 'absolute',
+              bottom: '100%',
+              left: 16,
+              background: '#fff',
+              borderRadius: 16,
+              padding: '12px 16px',
+              boxShadow: '0 8px 32px rgba(0,0,0,0.18)',
+              display: 'flex',
+              gap: 16,
+              alignItems: 'center',
+              zIndex: 100,
+              marginBottom: 8,
+            }}>
+              {SIZES.map(s => (
+                <button
+                  key={s}
+                  onClick={() => { setSize(s); setShowSizePicker(false); }}
+                  style={{
+                    width: 44, height: 44, borderRadius: '50%',
+                    background: size === s ? '#f0f9ff' : '#f9fafb',
+                    border: size === s ? '2px solid #3b82f6' : '2px solid #e5e7eb',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    transition: 'all 0.1s',
+                  }}
+                >
+                  <div style={{
+                    width: s * 1.2,
+                    height: s * 1.2,
+                    borderRadius: '50%',
+                    background: '#111',
+                    maxWidth: 28,
+                    maxHeight: 28,
+                  }} />
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Tool row */}
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            background: '#fff',
+            borderRadius: 20,
+            padding: '8px 12px',
+            boxShadow: '0 2px 12px rgba(0,0,0,0.08)',
+          }}>
+            {/* Color button */}
+            <button
+              onClick={() => { setShowColorPicker(p => !p); setShowSizePicker(false); }}
+              disabled={isPlaying}
+              style={{
+                width: 36, height: 36, borderRadius: '50%',
+                background: color,
+                border: showColorPicker ? '3px solid #3b82f6' : '2.5px solid #d1d5db',
+                cursor: 'pointer',
+                flexShrink: 0,
+                boxShadow: color === '#ffffff' ? '0 0 0 1px #d1d5db inset' : '0 2px 6px rgba(0,0,0,0.2)',
+                transition: 'transform 0.1s',
+                transform: showColorPicker ? 'scale(1.1)' : 'scale(1)',
+              }}
+            />
+
+            {/* Size button */}
+            <button
+              onClick={() => { setShowSizePicker(p => !p); setShowColorPicker(false); }}
+              disabled={isPlaying}
+              style={{
+                width: 44, height: 36, borderRadius: 12,
+                background: showSizePicker ? '#f0f9ff' : '#f3f4f6',
+                border: showSizePicker ? '2px solid #3b82f6' : '2px solid transparent',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                flexShrink: 0,
+                transition: 'all 0.1s',
+              }}
+            >
+              <div style={{
+                width: size * 1.2,
+                height: size * 1.2,
+                borderRadius: '50%',
+                background: '#374151',
+                maxWidth: 22,
+                maxHeight: 22,
+                minWidth: 4,
+                minHeight: 4,
+              }} />
+            </button>
+
+            <div style={{ flex: 1 }} />
+
+            {/* Stroke count */}
+            <span style={{
+              fontSize: 12,
+              color: '#9ca3af',
+              minWidth: 20,
+              textAlign: 'center',
+            }}>
+              {strokes.length > 0 ? `${strokes.length}画` : ''}
+            </span>
+
+            {/* Play/Stop button */}
+            <button
+              onClick={isPlaying ? stopPlay : play}
+              disabled={strokes.length === 0}
+              style={{
+                height: 44, paddingLeft: 20, paddingRight: 20,
+                borderRadius: 14,
+                background: strokes.length === 0 ? '#e5e7eb' : isPlaying ? '#ef4444' : '#3b82f6',
+                border: 'none',
+                cursor: strokes.length === 0 ? 'default' : 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                color: '#fff',
+                fontSize: 14,
+                fontWeight: 600,
+                letterSpacing: -0.3,
+                transition: 'all 0.15s',
+                boxShadow: strokes.length === 0 ? 'none' : '0 4px 14px rgba(59,130,246,0.4)',
+              }}
+            >
+              {isPlaying ? <StopIcon /> : <PlayIcon />}
+              {isPlaying ? '停止' : '再生'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </IOSDevice>
+  );
+}
+
+function ToolBtn({ onClick, disabled, children, title }) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      style={{
+        width: 36, height: 36, borderRadius: 10,
+        background: disabled ? '#f3f4f6' : '#fff',
+        border: '1.5px solid #e5e7eb',
+        cursor: disabled ? 'default' : 'pointer',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        color: disabled ? '#d1d5db' : '#374151',
+        transition: 'all 0.1s',
+        boxShadow: disabled ? 'none' : '0 1px 4px rgba(0,0,0,0.06)',
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function UndoIcon() {
+  return (
+    <svg width="18" height="16" viewBox="0 0 18 16" fill="none">
+      <path d="M1 5H11C14.314 5 17 7.686 17 11C17 14.314 14.314 17 11 17" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
+      <path d="M5 1L1 5L5 9" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg width="16" height="18" viewBox="0 0 16 18" fill="none">
+      <path d="M1 4H15M5 4V2H11V4M6 8V14M10 8V14M2 4L3 16H13L14 4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+  );
+}
+
+function PlayIcon() {
+  return (
+    <svg width="12" height="14" viewBox="0 0 12 14" fill="currentColor">
+      <path d="M1 1.5L11 7L1 12.5V1.5Z" />
+    </svg>
+  );
+}
+
+function StopIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+      <rect x="1" y="1" width="10" height="10" rx="2" />
+    </svg>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<DrawingApp />);
+</script>
+</body>
+</html>
