@@ -252,10 +252,18 @@ function DrawingApp() {
       { images: frames, gifWidth: GIF_W, gifHeight: GIF_H, interval: 0.06 },
       (obj) => {
         if (!obj.error) {
-          const link = document.createElement('a');
-          link.download = 'drawing.gif';
-          link.href = obj.image;
-          link.click();
+          const bin = atob(obj.image.split(',')[1]);
+          const arr = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+          const blob = new Blob([arr], { type: 'image/gif' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.download = 'drawing.gif';
+          a.href = url;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          setTimeout(() => URL.revokeObjectURL(url), 100);
         }
         setIsSaving(false);
       }
