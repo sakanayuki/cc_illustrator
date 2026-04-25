@@ -9,6 +9,7 @@
 <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/gifshot@0.4.5/build/gifshot.min.js" crossorigin="anonymous"></script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
@@ -38,6 +39,8 @@ function DrawingApp() {
   const [playProgress, setPlayProgress] = useState(0);
   const [showColorPicker, setShowColorPicker] = useState(false);
   const [showSizePicker, setShowSizePicker] = useState(false);
+  const [showSaveMenu, setShowSaveMenu] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const animRef = useRef(null);
 
   const redraw = useCallback((strokesToDraw, partial = null) => {
@@ -95,6 +98,7 @@ function DrawingApp() {
     setCurrentStroke({ color, size, points: [pos] });
     setShowColorPicker(false);
     setShowSizePicker(false);
+    setShowSaveMenu(false);
   };
 
   const moveDraw = (e) => {
@@ -186,6 +190,78 @@ function DrawingApp() {
     redraw(strokes);
   };
 
+  const saveAsJpg = () => {
+    const canvas = canvasRef.current;
+    const tmp = document.createElement('canvas');
+    tmp.width = canvas.width;
+    tmp.height = canvas.height;
+    const ctx = tmp.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, tmp.width, tmp.height);
+    ctx.drawImage(canvas, 0, 0);
+    const link = document.createElement('a');
+    link.download = 'drawing.jpg';
+    link.href = tmp.toDataURL('image/jpeg', 0.9);
+    link.click();
+    setShowSaveMenu(false);
+  };
+
+  const saveAsGif = () => {
+    if (strokes.length === 0) return;
+    setIsSaving(true);
+    setShowSaveMenu(false);
+
+    const GIF_W = 375, GIF_H = 600;
+    const scaleX = GIF_W / CANVAS_W, scaleY = GIF_H / CANVAS_H;
+    const off = document.createElement('canvas');
+    off.width = GIF_W; off.height = GIF_H;
+    const ctx = off.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, GIF_W, GIF_H);
+
+    const allPoints = [];
+    strokes.forEach((stroke, si) => {
+      stroke.points.forEach((pt, pi) => allPoints.push({ si, pi, stroke }));
+    });
+
+    const total = allPoints.length;
+    const frameStep = Math.max(1, Math.floor(total / 50));
+    const frames = [];
+
+    for (let idx = 0; idx < total; idx++) {
+      const { pi, stroke } = allPoints[idx];
+      if (pi === 0) {
+        ctx.beginPath();
+        ctx.strokeStyle = stroke.color;
+        ctx.lineWidth = stroke.size * scaleX;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.moveTo(stroke.points[0].x * scaleX, stroke.points[0].y * scaleY);
+      } else {
+        ctx.lineTo(stroke.points[pi].x * scaleX, stroke.points[pi].y * scaleY);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(stroke.points[pi].x * scaleX, stroke.points[pi].y * scaleY);
+      }
+      if (idx % frameStep === 0 || idx === total - 1) {
+        frames.push(off.toDataURL('image/png'));
+      }
+    }
+
+    gifshot.createGIF(
+      { images: frames, gifWidth: GIF_W, gifHeight: GIF_H, interval: 0.06 },
+      (obj) => {
+        if (!obj.error) {
+          const link = document.createElement('a');
+          link.download = 'drawing.gif';
+          link.href = obj.image;
+          link.click();
+        }
+        setIsSaving(false);
+      }
+    );
+  };
+
   const CANVAS_W = 1000;
   const CANVAS_H = 1600;
 
@@ -207,13 +283,43 @@ function DrawingApp() {
         flexShrink: 0,
       }}>
         <span style={{ fontSize: 20, fontWeight: 700, color: '#111', letterSpacing: -0.5 }}>お絵かき</span>
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div style={{ display: 'flex', gap: 8, position: 'relative' }}>
           <ToolBtn onClick={undo} disabled={strokes.length === 0 || isPlaying} title="元に戻す">
             <UndoIcon />
           </ToolBtn>
           <ToolBtn onClick={clear} disabled={strokes.length === 0 || isPlaying} title="クリア">
             <TrashIcon />
           </ToolBtn>
+          <ToolBtn
+            onClick={() => setShowSaveMenu(p => !p)}
+            disabled={strokes.length === 0 || isPlaying || isSaving}
+            title={isSaving ? '保存中...' : '保存'}
+          >
+            <SaveIcon />
+          </ToolBtn>
+          {showSaveMenu && (
+            <div style={{
+              position: 'absolute', top: '100%', right: 0, marginTop: 8,
+              background: '#fff', borderRadius: 12,
+              boxShadow: '0 8px 32px rgba(0,0,0,0.18)',
+              overflow: 'hidden', zIndex: 100, minWidth: 192,
+            }}>
+              <button onClick={saveAsGif} style={{
+                display: 'block', width: '100%', padding: '12px 16px',
+                background: 'none', border: 'none', borderBottom: '1px solid #f0f0f0',
+                textAlign: 'left', fontSize: 14, color: '#111', cursor: 'pointer',
+              }}>
+                GIF（アニメーション）
+              </button>
+              <button onClick={saveAsJpg} style={{
+                display: 'block', width: '100%', padding: '12px 16px',
+                background: 'none', border: 'none',
+                textAlign: 'left', fontSize: 14, color: '#111', cursor: 'pointer',
+              }}>
+                JPG（静止画）
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -507,6 +613,17 @@ function StopIcon() {
   return (
     <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
       <rect x="1" y="1" width="10" height="10" rx="2" />
+    </svg>
+  );
+}
+
+function SaveIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+      <rect x="2" y="1" width="12" height="14" rx="1.5" stroke="currentColor" strokeWidth="1.8"/>
+      <path d="M5 1v5h6V1" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/>
+      <rect x="4" y="9" width="8" height="5" rx="1" stroke="currentColor" strokeWidth="1.5"/>
+      <line x1="10" y1="1.5" x2="10" y2="5.5" stroke="currentColor" strokeWidth="1.5"/>
     </svg>
   );
 }
