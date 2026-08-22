@@ -9,7 +9,7 @@
 <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/gifshot@0.4.5/build/gifshot.min.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/gifshot@0.4.5/dist/gifshot.min.js" crossorigin="anonymous"></script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
@@ -28,6 +28,33 @@ const { useState, useEffect, useRef, useCallback } = React;
 
 const COLORS = ['#000000','#ef4444','#f97316','#eab308','#22c55e','#3b82f6','#8b5cf6','#ec4899','#ffffff'];
 const SIZES = [3, 7, 14, 24];
+const CANVAS_W = 1000;
+const CANVAS_H = 1600;
+const GIF_W = 375, GIF_H = 600;
+
+// Downloads are triggered from an anchor that is attached to the document:
+// a detached anchor is ignored by some browsers. Large payloads go through an
+// object URL rather than a multi-megabyte data: URI, which browsers refuse.
+function triggerDownload(href, filename, isObjectUrl) {
+  const link = document.createElement('a');
+  link.download = filename;
+  link.href = href;
+  link.rel = 'noopener';
+  link.style.display = 'none';
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  if (isObjectUrl) setTimeout(() => URL.revokeObjectURL(href), 60000);
+}
+
+function dataUrlToObjectUrl(dataUrl) {
+  const comma = dataUrl.indexOf(',');
+  const mime = (dataUrl.slice(5, comma).split(';')[0]) || 'application/octet-stream';
+  const binary = atob(dataUrl.slice(comma + 1));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return URL.createObjectURL(new Blob([bytes], { type: mime }));
+}
 
 function DrawingApp() {
   const canvasRef = useRef(null);
@@ -41,6 +68,7 @@ function DrawingApp() {
   const [showSizePicker, setShowSizePicker] = useState(false);
   const [showSaveMenu, setShowSaveMenu] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState(null);
   const animRef = useRef(null);
 
   const redraw = useCallback((strokesToDraw, partial = null) => {
@@ -191,79 +219,119 @@ function DrawingApp() {
   };
 
   const saveAsJpg = () => {
-    const canvas = canvasRef.current;
-    const tmp = document.createElement('canvas');
-    tmp.width = canvas.width;
-    tmp.height = canvas.height;
-    const ctx = tmp.getContext('2d');
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, tmp.width, tmp.height);
-    ctx.drawImage(canvas, 0, 0);
-    const link = document.createElement('a');
-    link.download = 'drawing.jpg';
-    link.href = tmp.toDataURL('image/jpeg', 0.9);
-    link.click();
     setShowSaveMenu(false);
+    setSaveError(null);
+    try {
+      const canvas = canvasRef.current;
+      const tmp = document.createElement('canvas');
+      tmp.width = canvas.width;
+      tmp.height = canvas.height;
+      const ctx = tmp.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, tmp.width, tmp.height);
+      ctx.drawImage(canvas, 0, 0);
+      const url = dataUrlToObjectUrl(tmp.toDataURL('image/jpeg', 0.9));
+      triggerDownload(url, 'drawing.jpg', true);
+    } catch (err) {
+      console.error(err);
+      setSaveError('JPGの保存に失敗しました。');
+    }
+  };
+
+  const drawGifSegment = (ctx, stroke, pi, scaleX, scaleY) => {
+    const pts = stroke.points;
+    if (pi === 0) {
+      // A stroke that never moved is a dot, same as on the live canvas.
+      if (pts.length === 1) {
+        ctx.beginPath();
+        ctx.arc(pts[0].x * scaleX, pts[0].y * scaleY, (stroke.size * scaleX) / 2, 0, Math.PI * 2);
+        ctx.fillStyle = stroke.color;
+        ctx.fill();
+        return;
+      }
+      ctx.beginPath();
+      ctx.strokeStyle = stroke.color;
+      ctx.lineWidth = stroke.size * scaleX;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.moveTo(pts[0].x * scaleX, pts[0].y * scaleY);
+      return;
+    }
+    ctx.lineTo(pts[pi].x * scaleX, pts[pi].y * scaleY);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(pts[pi].x * scaleX, pts[pi].y * scaleY);
   };
 
   const saveAsGif = () => {
-    if (strokes.length === 0) return;
-    setIsSaving(true);
+    if (strokes.length === 0 || isSaving) return;
     setShowSaveMenu(false);
+    setSaveError(null);
 
-    const GIF_W = 375, GIF_H = 600;
-    const scaleX = GIF_W / CANVAS_W, scaleY = GIF_H / CANVAS_H;
-    const off = document.createElement('canvas');
-    off.width = GIF_W; off.height = GIF_H;
-    const ctx = off.getContext('2d');
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, GIF_W, GIF_H);
-
-    const allPoints = [];
-    strokes.forEach((stroke, si) => {
-      stroke.points.forEach((pt, pi) => allPoints.push({ si, pi, stroke }));
-    });
-
-    const total = allPoints.length;
-    const frameStep = Math.max(1, Math.floor(total / 50));
-    const frames = [];
-
-    for (let idx = 0; idx < total; idx++) {
-      const { pi, stroke } = allPoints[idx];
-      if (pi === 0) {
-        ctx.beginPath();
-        ctx.strokeStyle = stroke.color;
-        ctx.lineWidth = stroke.size * scaleX;
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
-        ctx.moveTo(stroke.points[0].x * scaleX, stroke.points[0].y * scaleY);
-      } else {
-        ctx.lineTo(stroke.points[pi].x * scaleX, stroke.points[pi].y * scaleY);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.moveTo(stroke.points[pi].x * scaleX, stroke.points[pi].y * scaleY);
-      }
-      if (idx % frameStep === 0 || idx === total - 1) {
-        frames.push(off.toDataURL('image/png'));
-      }
+    if (typeof gifshot === 'undefined' || !gifshot || typeof gifshot.createGIF !== 'function') {
+      setSaveError('GIF生成ライブラリを読み込めませんでした。通信環境を確認してページを再読み込みしてください。');
+      return;
     }
 
-    gifshot.createGIF(
-      { images: frames, gifWidth: GIF_W, gifHeight: GIF_H, interval: 0.06 },
-      (obj) => {
-        if (!obj.error) {
-          const link = document.createElement('a');
-          link.download = 'drawing.gif';
-          link.href = obj.image;
-          link.click();
-        }
-        setIsSaving(false);
-      }
-    );
-  };
+    setIsSaving(true);
 
-  const CANVAS_W = 1000;
-  const CANVAS_H = 1600;
+    try {
+      const scaleX = GIF_W / CANVAS_W, scaleY = GIF_H / CANVAS_H;
+      const off = document.createElement('canvas');
+      off.width = GIF_W; off.height = GIF_H;
+      const ctx = off.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, GIF_W, GIF_H);
+
+      const allPoints = [];
+      strokes.forEach((stroke) => {
+        stroke.points.forEach((pt, pi) => allPoints.push({ pi, stroke }));
+      });
+
+      const total = allPoints.length;
+      const frameStep = Math.max(1, Math.ceil(total / 50));
+      const frames = [];
+
+      for (let idx = 0; idx < total; idx++) {
+        const { pi, stroke } = allPoints[idx];
+        drawGifSegment(ctx, stroke, pi, scaleX, scaleY);
+        if (idx % frameStep === 0 || idx === total - 1) {
+          frames.push(off.toDataURL('image/png'));
+        }
+      }
+      if (frames.length === 0) {
+        setIsSaving(false);
+        setSaveError('GIFにするストロークが足りません。');
+        return;
+      }
+      // Hold on the finished drawing so the loop does not snap back instantly.
+      const lastFrame = frames[frames.length - 1];
+      frames.push(lastFrame, lastFrame, lastFrame);
+
+      gifshot.createGIF(
+        { images: frames, gifWidth: GIF_W, gifHeight: GIF_H, interval: 0.06 },
+        (obj) => {
+          try {
+            if (obj && !obj.error && obj.image) {
+              triggerDownload(dataUrlToObjectUrl(obj.image), 'drawing.gif', true);
+            } else {
+              console.error('gifshot failed', obj);
+              setSaveError('GIFの生成に失敗しました。もう一度お試しください。');
+            }
+          } catch (err) {
+            console.error(err);
+            setSaveError('GIFの保存に失敗しました。');
+          } finally {
+            setIsSaving(false);
+          }
+        }
+      );
+    } catch (err) {
+      console.error(err);
+      setIsSaving(false);
+      setSaveError('GIFの生成に失敗しました。もう一度お試しください。');
+    }
+  };
 
   return (
     <div style={{
@@ -322,6 +390,27 @@ function DrawingApp() {
           )}
         </div>
       </div>
+
+      {saveError && (
+        <div
+          role="alert"
+          onClick={() => setSaveError(null)}
+          style={{
+            margin: '0 16px 8px',
+            padding: '10px 14px',
+            borderRadius: 12,
+            background: '#fef2f2',
+            border: '1px solid #fecaca',
+            color: '#b91c1c',
+            fontSize: 13,
+            lineHeight: 1.5,
+            cursor: 'pointer',
+            flexShrink: 0,
+          }}
+        >
+          {saveError}
+        </div>
+      )}
 
       {/* Canvas */}
       <div style={{
